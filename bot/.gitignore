@@ -1,0 +1,10 @@
+.venv
+.dev-venv
+.env
+.cache
+output.py
+__pycache__/
+app.log
+uploads/
+generated/
+resume_serve
