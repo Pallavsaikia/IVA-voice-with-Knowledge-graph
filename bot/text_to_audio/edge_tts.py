@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 class EdgeTTSService:
     def __init__(self, 
                  voice: str = "en-US-AriaNeural",
-                 rate: str = "+0%",
+                 rate: str = "+30%",
                  pitch: str = "+0Hz"):
         
         self.voice = voice

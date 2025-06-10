@@ -1,39 +1,57 @@
 import asyncio
 import json
 import websockets
+import numpy as np
+from scipy.signal import resample_poly
+import logging
+from typing import Tuple, Optional, Callable
+from audio.audio_processor import AudioProcessor
+logger = logging.getLogger(__name__)
 
 class SocketManager:
-    def __init__(self, call_id, bot_id):
+    def __init__(self, base_url:str,call_id: str, bot_id: str, audio_processor: Optional[AudioProcessor] = None):
         self.call_id = call_id
         self.bot_id = bot_id
         self.websocket = None
         self.receive_task = None
-
-    async def connect(self, on_receive=None, on_send=None):
-        print("done")
-        uri = f"ws://localhost:8080/ws?room={self.call_id}&clientId={self.bot_id}&type=agent"
+        self.base_url = base_url
+        self.auto_disconnect_enabled = True  # Flag to enable/disable auto-disconnect
+        # Initialize audio processor
+        self.audio_processor = audio_processor or AudioProcessor()
+        self.audio_processor.initialize_call_state(self.call_id)
+    
+    async def connect(self, on_receive: Optional[Callable] = None, on_send: Optional[Callable] = None):
+        print("Connecting...")
+        uri = f"ws://{self.base_url}/ws?room={self.call_id}&clientId={self.bot_id}&type=agent"
         print(f"[SocketManager] Connecting bot {self.bot_id} to {uri}")
+        
         self.websocket = await websockets.connect(uri)
         print(f"[SocketManager] Bot {self.bot_id} connected to call {self.call_id}")
-
-        await self.send_message(msg_type="bot_message", data={"text": "Hi, I'm connected and ready."}, on_send=on_send)
-
+        
+        await self.send_message(
+            msg_type="bot_message", 
+            data={"text": "Hi, I'm connected and ready."}, 
+            on_send=on_send
+        )
+        
         self.receive_task = asyncio.create_task(self._receive_loop(on_receive))
-        print("done")
-
-    async def send_message(self, msg_type=None, data=None, to_clients=None, raw_audio=None, on_send=None):
+        print("Connection established")
+    
+    async def send_message(self, msg_type: Optional[str] = None, data: Optional[dict] = None, 
+                          to_clients: Optional[list] = None, raw_audio: Optional[bytes] = None, 
+                          on_send: Optional[Callable] = None):
         if self.websocket is None:
             raise Exception(f"No active connection for bot {self.bot_id}")
-
+        
         if raw_audio is not None:
             await self.websocket.send(raw_audio)
-            if on_send:
-                await on_send({
-                    "type": "audio",
-                    "bytes_sent": len(raw_audio),
-                    "call_id": self.call_id,
-                    "bot_id": self.bot_id,
-                })
+            # if on_send:
+            #     await on_send({
+            #         "type": "audio",
+            #         "bytes_sent": len(raw_audio),
+            #         "call_id": self.call_id,
+            #         "bot_id": self.bot_id,
+            #     })
         else:
             message = {
                 "type": msg_type,
@@ -49,27 +67,81 @@ class SocketManager:
                     "call_id": self.call_id,
                     "bot_id": self.bot_id,
                 })
-
-    async def _receive_loop(self, on_receive):
+    
+    def set_auto_disconnect(self, enabled: bool):
+        """Enable or disable automatic disconnection when users leave"""
+        self.auto_disconnect_enabled = enabled
+        logger.info(f"[SocketManager] Auto-disconnect {'enabled' if enabled else 'disabled'} for bot {self.bot_id}")
+    
+    async def _handle_client_left(self, message_data: dict):
+        """Handle client_left messages and auto-disconnect if user leaves"""
+        if not self.auto_disconnect_enabled:
+            return
+        
+        client_type = message_data.get('data', {}).get('clientType')
+        client_id = message_data.get('data', {}).get('clientId')
+        
+        if client_type == 'user':
+            logger.info(f"[SocketManager] User {client_id} left the room. Auto-disconnecting bot {self.bot_id}")
+            print(f"[SocketManager] User left room - automatically disconnecting bot {self.bot_id}")
+            
+            # Optionally send a goodbye message before disconnecting
+            try:
+                await self.send_message(
+                    msg_type="bot_message",
+                    data={"text": "User left the room. Disconnecting..."}
+                )
+            except Exception as e:
+                logger.warning(f"[SocketManager] Could not send goodbye message: {e}")
+            
+            # Disconnect after a short delay to allow the message to be sent
+            asyncio.create_task(self._delayed_disconnect(delay=1.0))
+    
+    async def _delayed_disconnect(self, delay: float = 1.0):
+        """Disconnect after a delay"""
+        await asyncio.sleep(delay)
+        await self.disconnect()
+    
+    async def _receive_loop(self, on_receive: Optional[Callable]):
         try:
             async for message in self.websocket:
-                # print(f"[SocketManager] Message received for bot {self.bot_id}: {message}")
-
                 if isinstance(message, bytes):
-                    # print(f"[SocketManager] Received audio message of length {len(message)}")
-                    if on_receive:
-                        await on_receive(
-                            from_bot=self.bot_id,
-                            data=message,
-                            message_type="audio",
-                            socket_manager=self
-                        )
+                    # Process audio through AudioProcessor
+                    should_process, processed_buffer = self.audio_processor.process_audio_chunk(
+                        self.call_id, message
+                    )
+                    
+                    if should_process and processed_buffer and on_receive:
+                        logger.info(f"[SocketManager] Processing audio buffer of {len(processed_buffer)} bytes")
+                        
+                        # Create a task to handle the processed audio
+                        asyncio.create_task(self._handle_processed_audio(
+                            on_receive, processed_buffer
+                        ))
+                    
+                    # Optionally, you can still call on_receive for raw audio chunks
+                    # if you want to handle them differently
+                    # if on_receive:
+                    #     await on_receive(
+                    #         from_bot=self.bot_id,
+                    #         data=message,
+                    #         message_type="audio_chunk",
+                    #         socket_manager=self
+                    #     )
+                
                 else:
+                    # Handle JSON messages
                     try:
                         data = json.loads(message)
                     except Exception:
                         data = message
+                    
                     print(f"[SocketManager] Received JSON message: {data}")
+                    
+                    # Handle client_left messages for auto-disconnect
+                    if isinstance(data, dict) and data.get('type') == 'client_left':
+                        await self._handle_client_left(data)
+                    
                     if on_receive:
                         await on_receive(
                             from_bot=self.bot_id,
@@ -77,20 +149,54 @@ class SocketManager:
                             message_type="json",
                             socket_manager=self
                         )
+        
         except websockets.ConnectionClosed:
             print(f"[SocketManager] Connection closed for bot {self.bot_id} in call {self.call_id}")
         except Exception as e:
             print(f"[SocketManager] Receive loop error: {e}")
+            logger.error(f"[SocketManager] Receive loop error for bot {self.bot_id}: {e}")
         finally:
             self.websocket = None
             if self.receive_task:
                 self.receive_task.cancel()
             print(f"[SocketManager] Bot {self.bot_id} disconnected from call {self.call_id}")
-
+    
+    async def _handle_processed_audio(self, on_receive: Callable, processed_buffer: bytearray):
+        """Handle processed audio buffer in a separate task"""
+        try:
+            # Convert buffer to numpy array for transcription/processing
+            audio_array = self.audio_processor.resample_audio(processed_buffer)
+            
+            # Call the on_receive callback with processed audio
+            await on_receive(
+                from_bot=self.bot_id,
+                data={
+                    "audio_buffer": processed_buffer,
+                    "audio_array": audio_array,
+                    "sample_rate": self.audio_processor.target_sample_rate,
+                    "duration_seconds": len(audio_array) / self.audio_processor.target_sample_rate
+                },
+                message_type="processed_audio",
+                socket_manager=self
+            )
+        
+        except Exception as e:
+            logger.error(f"[SocketManager] Error handling processed audio: {e}")
+        finally:
+            # Mark processing as finished
+            self.audio_processor.finish_processing(self.call_id)
+    
     async def disconnect(self):
+        # Clean up audio processor state
+        self.audio_processor.cleanup_call_state(self.call_id)
+        
         if self.websocket:
             await self.websocket.close()
             print(f"[SocketManager] Closed connection for bot {self.bot_id} in call {self.call_id}")
+        
         if self.receive_task:
             self.receive_task.cancel()
-
+    
+    def is_audio_processing(self) -> bool:
+        """Check if audio is currently being processed"""
+        return self.audio_processor.is_processing(self.call_id)

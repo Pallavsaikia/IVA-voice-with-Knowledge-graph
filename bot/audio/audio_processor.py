@@ -1,7 +1,10 @@
+import asyncio
+import json
+import websockets
 import numpy as np
 from scipy.signal import resample_poly
 import logging
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Callable
 
 logger = logging.getLogger(__name__)
 
