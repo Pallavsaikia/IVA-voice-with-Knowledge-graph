@@ -12,11 +12,30 @@ A scalable, intelligent LLM-based system combining **Neo4j**, **LlamaIndex**, **
 
 - ✅ Created **Knowledge Graph** in Neo4j to represent domain knowledge.
 - ✅ Developed a **RAG agent** to query the KG using natural language via LlamaIndex.
-- ✅ Implemented **WebSocket-based call system**, where the **bot joins** an audio channel upon trigger (not directly called).
+- ✅ Implemented **WebSocket-based call system**, where the **bot joins an audio channel upon trigger** (not directly called).
 - ✅ Built a **real-time audio interface** using browser and FastAPI.
 - ✅ Added **speech-to-text transcription** using Whisper.
-- ✅ Integrated **silence detection** and **noise filtering** to prevent unnecessary responses.
-- ✅ Bot **decodes user speech**, queries the graph, and **responds intelligently** using LLMs.
+- ✅ Integrated **silence detection and noise filtering** to prevent unnecessary responses.
+- ✅ Bot **decodes user speech**, queries the graph, and **responds intelligently using LLMs.**
+- ✅ The system **splits incoming audio into chunks from silence to silence** using an audio processor.
+- ✅ The **Socket Manager efficiently handles real-time audio transmission**, breaking audio into **silence-based segments** for processing.
+
+## 📂 Key Components
+
+### `audio_processor.py`
+- Detects **silence in audio** and uses it as a natural breakpoint to split each user question.
+- Ensures the system only processes **complete audio segments from one silence point to the next**.
+
+### `transcriber.py`
+- Handles **real-time transcription** of the segmented audio chunks.
+- Uses **Whisper** for accurate speech-to-text conversion.
+
+### `socket_manager.py`
+- Manages the **WebSocket connection** for real-time audio streaming.
+- Uses the `on_receive` function to **capture and split audio streams into silence-based segments.**
+- Sends only **complete audio chunks (silence to silence)** to the processing pipeline.
+- Supports **auto-disconnect** when the user leaves the call.
+
 
 ---
 
@@ -38,26 +57,31 @@ A scalable, intelligent LLM-based system combining **Neo4j**, **LlamaIndex**, **
 
 ```bash
 .
+├── api/                          # API-related logic
 ├── audio/                        # Audio helpers or processing
+│   └── audio_processor.py
+├── config/                       # Configuration files
 ├── data/                         # Datasets (e.g., healthcare_dataset.csv)
-├── interface/
-│   └── websocket.py
-├── rag/   
-│   └── neo4j.py                  # RAG logic and agents
-├── static/
-│   └── index.html                # Web interface for call
-├── transcription/
-│   └── transcriber.py           # Transcribes and filters incoming audio
-├── utils/
-│   └── logger.py           
-├── .env                          # Env config (keys, URIs)
+├── examples/                     # Example files or notebooks
+├── rag/                          # RAG logic and agents
+│   └── neo4j.py
+├── recordings/                   # Saved audio recordings
+├── requirements/                 # Requirements files or setup configs
+├── sockets/                      # WebSocket handling
+│   └── socket_manager.py
+├── static/                       # Static files (HTML, CSS, JS)
+├── text_to_audio/                # Text-to-speech logic
+│   └── edge_tts.py
+├── transcription/                # Audio transcription logic
+│   └── transcriber.py
+├── utils/                        # Utility scripts
+│   └── logger.py
+├── .env-example                  # Example environment configuration
 ├── .gitignore
-├── audio.py                      # Handles audio input/output
 ├── bot.py                        # Bot logic (join, listen, respond)
-├── config.py                     # App-level configs
 ├── main.py                       # FastAPI app entry point
-├── README.md
-└── upload_data.py                # Load CSV data to Neo4j
+├── upload_data.py                # Load CSV data to Neo4j
+
 
 ```
 
