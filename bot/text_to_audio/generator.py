@@ -1,6 +1,7 @@
 from gtts import gTTS
+import edge_tts
+import asyncio
 import io
-
 class GTTSService:
     def __init__(self, lang="en"):
         self.lang = lang
@@ -10,6 +11,19 @@ class GTTSService:
         buffer = io.BytesIO()
         tts.write_to_fp(buffer)
         return buffer.getvalue()
+    
+class EdgeTTSService:
+    def __init__(self, voice="en-US-JennyNeural", rate="+0%"):
+        self.voice = voice
+        self.rate = rate
+
+    async def text_to_audio_bytes(self, text: str) -> bytes:
+        communicate = edge_tts.Communicate(text, self.voice, rate=self.rate)
+        audio_stream = b""
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_stream += chunk["data"]
+        return audio_stream
     
 import os
 import hashlib
@@ -23,7 +37,7 @@ class TTSCache:
     def _hash_text(self, text: str) -> str:
         return hashlib.md5(text.encode('utf-8')).hexdigest()
 
-    def get_audio_bytes(self, text: str) -> bytes:
+    async def get_audio_bytes(self, text: str) -> bytes:
         key = self._hash_text(text)
         cache_path = os.path.join(self.cache_dir, f"{key}.wav")  # or mp3 based on your tts
 
@@ -32,7 +46,7 @@ class TTSCache:
                 audio_bytes = f.read()
             print(f"Loaded audio from cache for: {text}")
         else:
-            audio_bytes = self.tts_service.text_to_audio_bytes(text)
+            audio_bytes = await self.tts_service.text_to_audio_bytes(text)
             with open(cache_path, "wb") as f:
                 f.write(audio_bytes)
             print(f"Cached new audio for: {text}")

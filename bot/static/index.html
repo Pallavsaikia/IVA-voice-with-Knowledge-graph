@@ -315,311 +315,360 @@
     </div>
 
     <script>
-        let ws;
-        let audioContext;
-        let source;
-        let processor;
-        let playingAudioContext;
-        let isMuted = false;
-        let isConnected = false;
-        let clientId = '';
-        let currentStream = null;
+    let ws;
+    let audioContext;
+    let source;
+    let processor;
+    let isMuted = false;
+    let isConnected = false;
+    let clientId = '';
+    let currentStream = null;
+    let currentAudioSource = null;
+    let playingAudioContext = null;
+    let audioQueue = [];
+    let isPlaying = false;
 
-        // Generate random client ID on page load
-        document.getElementById('clientId').value = 'user_' + Math.random().toString(36).substr(2, 8);
+    // Generate random client ID on page load
+    document.getElementById('clientId').value = 'user_' + Math.random().toString(36).substr(2, 8);
 
-        // Volume control
-        document.getElementById('volumeSlider').addEventListener('input', function(e) {
-            const volume = e.target.value;
-            document.getElementById('volumeValue').textContent = volume + '%';
-            if (playingAudioContext) {
-                // Note: Volume control would need to be implemented with GainNode
-            }
-        });
+    // Volume control
+    document.getElementById('volumeSlider').addEventListener('input', function(e) {
+        const volume = e.target.value;
+        document.getElementById('volumeValue').textContent = volume + '%';
+        if (playingAudioContext) {
+            // Volume control implemented via gainNode in playNextAudio()
+        }
+    });
 
-        function updateStatus(status, message = '') {
-            const indicator = document.getElementById('statusIndicator');
-            indicator.className = `status-indicator status-${status}`;
-            indicator.textContent = message || status.charAt(0).toUpperCase() + status.slice(1);
+    function updateStatus(status, message = '') {
+        const indicator = document.getElementById('statusIndicator');
+        indicator.className = `status-indicator status-${status}`;
+        indicator.textContent = message || status.charAt(0).toUpperCase() + status.slice(1);
+    }
+
+    function showError(message) {
+        const errorDiv = document.getElementById('errorMessage');
+        errorDiv.textContent = message;
+        errorDiv.classList.remove('hidden');
+        setTimeout(() => {
+            errorDiv.classList.add('hidden');
+        }, 5000);
+    }
+
+    function addBotMessage(text) {
+        const container = document.getElementById('botMessages');
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message';
+        messageDiv.innerHTML = `
+            <div>${text}</div>
+            <div class="timestamp">${new Date().toLocaleTimeString()}</div>
+        `;
+        container.appendChild(messageDiv);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function addTranscription(text) {
+        const container = document.getElementById('transcriptions');
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message transcription';
+        messageDiv.innerHTML = `
+            <div><strong>You:</strong> ${text}</div>
+            <div class="timestamp">${new Date().toLocaleTimeString()}</div>
+        `;
+        container.appendChild(messageDiv);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    async function startCall() {
+        const callId = document.getElementById("callId").value.trim();
+        clientId = document.getElementById("clientId").value.trim();
+
+        if (!callId) {
+            showError("Please enter a room ID");
+            return;
         }
 
-        function showError(message) {
-            const errorDiv = document.getElementById('errorMessage');
-            errorDiv.textContent = message;
-            errorDiv.classList.remove('hidden');
-            setTimeout(() => {
-                errorDiv.classList.add('hidden');
-            }, 5000);
+        if (!clientId) {
+            showError("Please enter your name");
+            return;
         }
 
-        function addBotMessage(text) {
-            const container = document.getElementById('botMessages');
-            const messageDiv = document.createElement('div');
-            messageDiv.className = 'message';
-            messageDiv.innerHTML = `
-                <div>${text}</div>
-                <div class="timestamp">${new Date().toLocaleTimeString()}</div>
-            `;
-            container.appendChild(messageDiv);
-            container.scrollTop = container.scrollHeight;
+        if (isConnected) {
+            showError("Already connected to a call");
+            return;
         }
 
-        function addTranscription(text) {
-            const container = document.getElementById('transcriptions');
-            const messageDiv = document.createElement('div');
-            messageDiv.className = 'message transcription';
-            messageDiv.innerHTML = `
-                <div><strong>You:</strong> ${text}</div>
-                <div class="timestamp">${new Date().toLocaleTimeString()}</div>
-            `;
-            container.appendChild(messageDiv);
-            container.scrollTop = container.scrollHeight;
-        }
+        updateStatus('connecting', 'Starting bot...');
 
-        async function startCall() {
-            const callId = document.getElementById("callId").value.trim();
-            clientId = document.getElementById("clientId").value.trim();
-            
-            if (!callId) {
-                showError("Please enter a room ID");
-                return;
-            }
-            
-            if (!clientId) {
-                showError("Please enter your name");
-                return;
-            }
-
-            // Prevent multiple connections
-            if (isConnected) {
-                showError("Already connected to a call");
-                return;
-            }
-
-            updateStatus('connecting', 'Starting bot...');
-
-            try {
-                // Call /join endpoint to start the bot
-                const response = await fetch("http://localhost:9000/join", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ room_id: callId }),
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`Failed to start bot: ${response.statusText}`);
-                }
-
-                const botInfo = await response.json();
-                console.log("Bot started:", botInfo);
-
-                updateStatus('connecting', 'Connecting to room...');
-
-                // Wait a moment for bot to connect first
-                await new Promise(resolve => setTimeout(resolve, 1000));
-
-                // Now open the WebSocket connection
-                ws = new WebSocket(`ws://localhost:8080/ws?room=${callId}&clientId=${clientId}&type=user`);
-                ws.binaryType = "arraybuffer";
-
-                ws.onmessage = function(event) {
-                    if (typeof event.data === "string") {
-                        try {
-                            const message = JSON.parse(event.data);
-                            handleWebSocketMessage(message);
-                        } catch (e) {
-                            console.error("Failed to parse message:", e);
-                            addBotMessage(event.data);
-                        }
-                    } else {
-                        // Audio data from bot
-                        playAudio(event.data);
-                    }
-                };
-
-                ws.onopen = () => {
-                    console.log("WebSocket connection opened");
-                    updateStatus('connected', 'Connected to call');
-                    isConnected = true;
-                    document.getElementById('joinBtn').classList.add('hidden');
-                    document.getElementById('leaveBtn').classList.remove('hidden');
-                    document.getElementById('audioControls').classList.remove('hidden');
-                    startAudioCapture();
-                };
-
-                ws.onclose = () => {
-                    console.log("WebSocket connection closed");
-                    updateStatus('disconnected', 'Disconnected');
-                    isConnected = false;
-                    stopAudioCapture();
-                    document.getElementById('joinBtn').classList.remove('hidden');
-                    document.getElementById('leaveBtn').classList.add('hidden');
-                    document.getElementById('audioControls').classList.add('hidden');
-                };
-
-                ws.onerror = (error) => {
-                    console.error("WebSocket error:", error);
-                    showError("Connection error occurred");
-                    updateStatus('disconnected', 'Connection failed');
-                };
-
-            } catch (err) {
-                console.error("Error starting call:", err);
-                showError(`Error starting call: ${err.message}`);
-                updateStatus('disconnected', 'Failed to connect');
-            }
-        }
-
-        function handleWebSocketMessage(message) {
-            console.log("Received message:", message);
-            
-            switch (message.type) {
-                case 'welcome':
-                    addBotMessage(`Welcome to room ${message.data.roomId}!`);
-                    break;
-                case 'bot_message':
-                    addBotMessage(message.data.text);
-                    break;
-                case 'transcription':
-                    addTranscription(message.data.text);
-                    break;
-                case 'client_joined':
-                    if (message.data.clientType === 'agent') {
-                        addBotMessage(`🤖 AI Assistant joined the call`);
-                    } else {
-                        addBotMessage(`👤 ${message.data.clientId} joined the call`);
-                    }
-                    break;
-                case 'client_left':
-                    if (message.data.clientType === 'agent') {
-                        addBotMessage(`🤖 AI Assistant left the call`);
-                    } else {
-                        addBotMessage(`👤 ${message.data.clientId} left the call`);
-                    }
-                    break;
-                default:
-                    console.log("Unknown message type:", message.type);
-            }
-        }
-
-        async function startAudioCapture() {
-            try {
-                audioContext = new AudioContext();
-                currentStream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    }
-                });
-                
-                source = audioContext.createMediaStreamSource(currentStream);
-                processor = audioContext.createScriptProcessor(4096, 1, 1);
-                
-                source.connect(processor);
-                processor.connect(audioContext.destination);
-                
-                processor.onaudioprocess = function(e) {
-                    if (!isMuted && ws && ws.readyState === WebSocket.OPEN) {
-                        const inputData = e.inputBuffer.getChannelData(0);
-                        const int16Data = convertFloat32ToInt16(inputData);
-                        ws.send(int16Data.buffer);
-                    }
-                };
-                
-                console.log("Audio capture started");
-            } catch (err) {
-                console.error("Error accessing microphone:", err);
-                showError(`Microphone access denied: ${err.message}`);
-            }
-        }
-
-        function stopAudioCapture() {
-            if (currentStream) {
-                currentStream.getTracks().forEach(track => track.stop());
-                currentStream = null;
-            }
-            if (source) {
-                source.disconnect();
-                source = null;
-            }
-            if (processor) {
-                processor.disconnect();
-                processor = null;
-            }
-            if (audioContext) {
-                audioContext.close();
-                audioContext = null;
-            }
-            console.log("Audio capture stopped");
-        }
-
-        async function leaveCall() {
-            if (ws) {
-                ws.close();
-            }
-            
-            // Notify bot to leave
-            try {
-                const callId = document.getElementById("callId").value.trim();
-                await fetch("http://localhost:9000/leave", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ room_id: callId }),
-                });
-            } catch (err) {
-                console.error("Error notifying bot to leave:", err);
-            }
-            
-            stopAudioCapture();
-        }
-
-        function toggleMute() {
-            isMuted = !isMuted;
-            const muteBtn = document.getElementById('muteBtn');
-            muteBtn.textContent = isMuted ? '🔇 Unmute' : '🎤 Mute';
-            muteBtn.className = isMuted ? 'btn-danger' : 'btn-secondary';
-        }
-
-        function convertFloat32ToInt16(buffer) {
-            const l = buffer.length;
-            const int16Buffer = new Int16Array(l);
-            for (let i = 0; i < l; i++) {
-                let s = Math.max(-1, Math.min(1, buffer[i]));
-                int16Buffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-            }
-            return int16Buffer;
-        }
-
-        function playAudio(arrayBuffer) {
-            if (!playingAudioContext) {
-                playingAudioContext = new AudioContext();
-            }
-            
-            playingAudioContext.decodeAudioData(arrayBuffer, (buffer) => {
-                const sourceNode = playingAudioContext.createBufferSource();
-                const gainNode = playingAudioContext.createGain();
-                
-                sourceNode.buffer = buffer;
-                sourceNode.connect(gainNode);
-                gainNode.connect(playingAudioContext.destination);
-                
-                // Apply volume
-                const volume = document.getElementById('volumeSlider').value / 100;
-                gainNode.gain.value = volume;
-                
-                sourceNode.start(0);
-            }, (error) => {
-                console.error("Audio decode error:", error);
+        try {
+            const response = await fetch("http://localhost:9000/join", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ room_id: callId }),
             });
+
+            if (!response.ok) {
+                throw new Error(`Failed to start bot: ${response.statusText}`);
+            }
+
+            const botInfo = await response.json();
+            console.log("Bot started:", botInfo);
+
+            updateStatus('connecting', 'Connecting to room...');
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            ws = new WebSocket(`ws://localhost:8080/ws?room=${callId}&clientId=${clientId}&type=user`);
+            ws.binaryType = "arraybuffer";
+
+            ws.onmessage = function(event) {
+                if (typeof event.data === "string") {
+                    try {
+                        const message = JSON.parse(event.data);
+                        handleWebSocketMessage(message);
+                    } catch (e) {
+                        console.error("Failed to parse message:", e);
+                        addBotMessage(event.data);
+                    }
+                } else {
+                    // Audio data from bot
+                    playAudio(event.data);
+                }
+            };
+
+            ws.onopen = () => {
+                console.log("WebSocket connection opened");
+                updateStatus('connected', 'Connected to call');
+                isConnected = true;
+                document.getElementById('joinBtn').classList.add('hidden');
+                document.getElementById('leaveBtn').classList.remove('hidden');
+                document.getElementById('audioControls').classList.remove('hidden');
+                startAudioCapture();
+            };
+
+            ws.onclose = () => {
+                console.log("WebSocket connection closed");
+                updateStatus('disconnected', 'Disconnected');
+                isConnected = false;
+                stopAudioCapture();
+                document.getElementById('joinBtn').classList.remove('hidden');
+                document.getElementById('leaveBtn').classList.add('hidden');
+                document.getElementById('audioControls').classList.add('hidden');
+            };
+
+            ws.onerror = (error) => {
+                console.error("WebSocket error:", error);
+                showError("Connection error occurred");
+                updateStatus('disconnected', 'Connection failed');
+            };
+
+        } catch (err) {
+            console.error("Error starting call:", err);
+            showError(`Error starting call: ${err.message}`);
+            updateStatus('disconnected', 'Failed to connect');
+        }
+    }
+
+    function handleWebSocketMessage(message) {
+        console.log("Received message:", message);
+
+        switch (message.type) {
+            case 'welcome':
+                addBotMessage(`Welcome to room ${message.data.roomId}!`);
+                break;
+            case 'bot_message':
+                addBotMessage(message.data.text);
+                break;
+            case 'cancel_audio':
+                if (currentAudioSource) {
+                    try {
+                        currentAudioSource.stop();
+                        currentAudioSource.disconnect();
+                    } catch (e) {
+                        // Ignore errors if already stopped/disconnected
+                    }
+                    currentAudioSource = null;
+                    console.log("Audio cancelled/stopped");
+                }
+                break;
+            case 'transcription':
+                addTranscription(message.data.text);
+                break;
+            case 'client_joined':
+                if (message.data.clientType === 'agent') {
+                    addBotMessage(`🤖 AI Assistant joined the call`);
+                } else {
+                    addBotMessage(`👤 ${message.data.clientId} joined the call`);
+                }
+                break;
+            case 'client_left':
+                if (message.data.clientType === 'agent') {
+                    addBotMessage(`🤖 AI Assistant left the call`);
+                } else {
+                    addBotMessage(`👤 ${message.data.clientId} left the call`);
+                }
+                break;
+            default:
+                console.log("Unknown message type:", message.type);
+        }
+    }
+
+    async function startAudioCapture() {
+        try {
+            audioContext = new AudioContext();
+            currentStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            });
+
+            source = audioContext.createMediaStreamSource(currentStream);
+            processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+
+            processor.onaudioprocess = function(e) {
+                if (!isMuted && ws && ws.readyState === WebSocket.OPEN) {
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    const int16Data = convertFloat32ToInt16(inputData);
+                    ws.send(int16Data.buffer);
+                }
+            };
+
+            console.log("Audio capture started");
+        } catch (err) {
+            console.error("Error accessing microphone:", err);
+            showError(`Microphone access denied: ${err.message}`);
+        }
+    }
+
+    function stopAudioCapture() {
+        if (currentStream) {
+            currentStream.getTracks().forEach(track => track.stop());
+            currentStream = null;
+        }
+        if (source) {
+            source.disconnect();
+            source = null;
+        }
+        if (processor) {
+            processor.disconnect();
+            processor = null;
+        }
+        if (audioContext) {
+            audioContext.close();
+            audioContext = null;
+        }
+        console.log("Audio capture stopped");
+    }
+
+    async function leaveCall() {
+        if (ws) {
+            ws.close();
         }
 
-        // Handle page unload
-        window.addEventListener('beforeunload', function() {
-            if (isConnected) {
-                leaveCall();
+        try {
+            const callId = document.getElementById("callId").value.trim();
+            await fetch("http://localhost:9000/leave", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ room_id: callId }),
+            });
+        } catch (err) {
+            console.error("Error notifying bot to leave:", err);
+        }
+
+        stopAudioCapture();
+    }
+
+    function toggleMute() {
+        isMuted = !isMuted;
+        const muteBtn = document.getElementById('muteBtn');
+        muteBtn.textContent = isMuted ? '🔇 Unmute' : '🎤 Mute';
+        muteBtn.className = isMuted ? 'btn-danger' : 'btn-secondary';
+    }
+
+    function convertFloat32ToInt16(buffer) {
+        const l = buffer.length;
+        const int16Buffer = new Int16Array(l);
+        for (let i = 0; i < l; i++) {
+            let s = Math.max(-1, Math.min(1, buffer[i]));
+            int16Buffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+        return int16Buffer;
+    }
+
+    function playAudio(arrayBuffer) {
+        audioQueue.push(arrayBuffer);
+        if (!isPlaying) {
+            playNextAudio();
+        }
+    }
+
+    function playNextAudio() {
+        if (audioQueue.length === 0) {
+            isPlaying = false;
+            return;
+        }
+
+        isPlaying = true;
+        const arrayBuffer = audioQueue.shift();
+
+        if (!playingAudioContext) {
+            playingAudioContext = new AudioContext();
+        }
+
+        playingAudioContext.decodeAudioData(arrayBuffer, (buffer) => {
+            if (currentAudioSource) {
+                try {
+                    currentAudioSource.stop();
+                    currentAudioSource.disconnect();
+                } catch (e) {
+                    // ignore errors if already stopped/disconnected
+                }
+                currentAudioSource = null;
             }
+
+            const sourceNode = playingAudioContext.createBufferSource();
+            const gainNode = playingAudioContext.createGain();
+
+            sourceNode.buffer = buffer;
+            sourceNode.connect(gainNode);
+            gainNode.connect(playingAudioContext.destination);
+
+            const volume = document.getElementById('volumeSlider').value / 100;
+            gainNode.gain.value = volume;
+
+            sourceNode.start(0);
+            currentAudioSource = sourceNode;
+
+            sourceNode.onended = () => {
+                if (currentAudioSource) {
+                    try {
+                        currentAudioSource.disconnect();
+                    } catch (e) {
+                        // ignore if already disconnected
+                    }
+                    currentAudioSource = null;
+                }
+                playNextAudio();
+            };
+        }, (error) => {
+            console.error("Audio decode error:", error);
+            playNextAudio();
         });
-    </script>
+    }
+
+    // Handle page unload
+    window.addEventListener('beforeunload', function() {
+        if (isConnected) {
+            leaveCall();
+        }
+    });
+</script>
+
 </body>
 </html>

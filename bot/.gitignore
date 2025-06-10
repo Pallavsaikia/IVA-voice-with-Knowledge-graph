@@ -8,3 +8,4 @@ app.log
 uploads/
 generated/
 resume_serve
+tts_cache/
