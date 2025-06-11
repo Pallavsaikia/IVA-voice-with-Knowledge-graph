@@ -8,7 +8,7 @@ from audio.audio_processor import AudioProcessor
 from transcription.transcriber import Transcriber
 from text_to_audio.edge_tts import EdgeTTSService
 import logging
-from config import Greetings,PauseText
+from config import Greetings,PauseText,StopResponseText
 from rag.neo4j import Neo4jQueryEngine
 
 # Configure logging
@@ -18,10 +18,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 audio_processor = AudioProcessor()
-transcriber=Transcriber()
+transcriber=Transcriber( 
+                 model_size="large-v2",
+                 compute_type = "float16",
+                 device = "cuda",
+                 language= "en")
 tts_service=EdgeTTSService()
 greetings=Greetings()
 pause_text=PauseText()
+stop_text=StopResponseText()
 app = FastAPI()
 
 Neo4jQueryEngine.setup_llm()
@@ -51,7 +56,7 @@ async def on_receive(from_bot, data, message_type, socket_manager:SocketManager)
         sample_rate = data['sample_rate']
 
         transcribed_text, is_empty = await transcriber.transcribe_audio(audio_array, sample_rate)
-
+        
         if not is_empty:
             print(f"Transcribed Text: {transcribed_text}")
             await socket_manager.send_message(
@@ -60,7 +65,33 @@ async def on_receive(from_bot, data, message_type, socket_manager:SocketManager)
             )
         else:
             print("No speech detected or silence.")
-        pause=pause_text.pick_random_greeting()
+            return
+        # if "stop" in transcribed_text.lower():
+        #     await socket_manager.send_message(
+        #             msg_type="cancel_audio"
+        #         )
+        #     stop=stop_text.pick_random_stop_text()
+        #     stop_audio=await tts_service.text_to_audio_bytes(stop)
+            
+        #     await socket_manager.send_message(
+        #             msg_type="cancel_audio"
+        #         )
+        #     await socket_manager.send_message(
+        #                 msg_type="bot_message", 
+        #                 data={"text": stop}
+        #         )
+        #     await socket_manager.send_message(
+        #                 raw_audio=stop_audio
+        #         )
+        #     await socket_manager.send_message(raw_audio=stop_audio)
+        #     await socket_manager.cancel_other_on_receive_tasks()
+        #     return
+        await socket_manager.cancel_other_on_receive_tasks()
+        await socket_manager.send_message(
+                    msg_type="cancel_audio"
+                )
+        
+        pause=pause_text.pick_random_pause()
         pause_audio=await tts_service.text_to_audio_bytes(pause)
         await socket_manager.send_message(
                     msg_type="bot_message", 

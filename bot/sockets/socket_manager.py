@@ -19,6 +19,9 @@ class SocketManager:
         # Initialize audio processor
         self.audio_processor = audio_processor or AudioProcessor()
         self.audio_processor.initialize_call_state(self.call_id)
+        
+        # Track pending on_receive tasks to allow cancellation
+        self.pending_on_receive_tasks = set()
     
     async def connect(self, on_receive: Optional[Callable] = None, on_send: Optional[Callable] = None):
         print("Connecting...")
@@ -73,6 +76,33 @@ class SocketManager:
         self.auto_disconnect_enabled = enabled
         logger.info(f"[SocketManager] Auto-disconnect {'enabled' if enabled else 'disabled'} for bot {self.bot_id}")
     
+    async def _cancel_pending_on_receive_tasks(self, exclude_current: bool = True):
+        """Cancel all pending on_receive tasks"""
+        if self.pending_on_receive_tasks:
+            current_task = asyncio.current_task() if exclude_current else None
+            
+            # Filter out the current task if exclude_current is True
+            tasks_to_cancel = {
+                task for task in self.pending_on_receive_tasks 
+                if not task.done() and (not exclude_current or task != current_task)
+            }
+            
+            if tasks_to_cancel:
+                logger.info(f"[SocketManager] Cancelling {len(tasks_to_cancel)} pending on_receive tasks")
+                
+                for task in tasks_to_cancel:
+                    task.cancel()
+                
+                # Wait for all tasks to complete their cancellation
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                
+                # Remove cancelled tasks from the set
+                self.pending_on_receive_tasks -= tasks_to_cancel
+    
+    async def cancel_other_on_receive_tasks(self):
+        """Public method to cancel all other pending on_receive tasks from within an on_receive callback"""
+        await self._cancel_pending_on_receive_tasks(exclude_current=True)
+    
     async def _handle_client_left(self, message_data: dict):
         """Handle client_left messages and auto-disconnect if user leaves"""
         if not self.auto_disconnect_enabled:
@@ -102,6 +132,20 @@ class SocketManager:
         await asyncio.sleep(delay)
         await self.disconnect()
     
+    async def _safe_on_receive_call(self, on_receive: Callable, *args, **kwargs):
+        """Wrapper for on_receive calls that handles cancellation gracefully"""
+        try:
+            await on_receive(*args, **kwargs)
+        except asyncio.CancelledError:
+            logger.debug(f"[SocketManager] on_receive task cancelled for bot {self.bot_id}")
+            raise  # Re-raise to properly handle cancellation
+        except Exception as e:
+            logger.error(f"[SocketManager] Error in on_receive callback: {e}")
+        finally:
+            # Remove this task from the pending set when it completes
+            current_task = asyncio.current_task()
+            self.pending_on_receive_tasks.discard(current_task)
+    
     async def _receive_loop(self, on_receive: Optional[Callable]):
         try:
             async for message in self.websocket:
@@ -114,10 +158,14 @@ class SocketManager:
                     if should_process and processed_buffer and on_receive:
                         logger.info(f"[SocketManager] Processing audio buffer of {len(processed_buffer)} bytes")
                         
+                        # Cancel previous pending on_receive tasks before starting new one
+                        await self._cancel_pending_on_receive_tasks(exclude_current=False)
+                        
                         # Create a task to handle the processed audio
-                        asyncio.create_task(self._handle_processed_audio(
+                        task = asyncio.create_task(self._handle_processed_audio(
                             on_receive, processed_buffer
                         ))
+                        self.pending_on_receive_tasks.add(task)
                     
                     # Optionally, you can still call on_receive for raw audio chunks
                     # if you want to handle them differently
@@ -143,12 +191,18 @@ class SocketManager:
                         await self._handle_client_left(data)
                     
                     if on_receive:
-                        await on_receive(
+                        # Cancel previous pending on_receive tasks before starting new one
+                        await self._cancel_pending_on_receive_tasks(exclude_current=False)
+                        
+                        # Create and track the new on_receive task
+                        task = asyncio.create_task(self._safe_on_receive_call(
+                            on_receive,
                             from_bot=self.bot_id,
                             data=data,
                             message_type="json",
                             socket_manager=self
-                        )
+                        ))
+                        self.pending_on_receive_tasks.add(task)
         
         except websockets.ConnectionClosed:
             print(f"[SocketManager] Connection closed for bot {self.bot_id} in call {self.call_id}")
@@ -156,6 +210,9 @@ class SocketManager:
             print(f"[SocketManager] Receive loop error: {e}")
             logger.error(f"[SocketManager] Receive loop error for bot {self.bot_id}: {e}")
         finally:
+            # Cancel any remaining pending tasks
+            await self._cancel_pending_on_receive_tasks(exclude_current=False)
+            
             self.websocket = None
             if self.receive_task:
                 self.receive_task.cancel()
@@ -167,8 +224,9 @@ class SocketManager:
             # Convert buffer to numpy array for transcription/processing
             audio_array = self.audio_processor.resample_audio(processed_buffer)
             
-            # Call the on_receive callback with processed audio
-            await on_receive(
+            # Call the on_receive callback with processed audio using the safe wrapper
+            await self._safe_on_receive_call(
+                on_receive,
                 from_bot=self.bot_id,
                 data={
                     "audio_buffer": processed_buffer,
@@ -180,6 +238,9 @@ class SocketManager:
                 socket_manager=self
             )
         
+        except asyncio.CancelledError:
+            logger.debug(f"[SocketManager] Audio processing task cancelled for bot {self.bot_id}")
+            raise  # Re-raise to properly handle cancellation
         except Exception as e:
             logger.error(f"[SocketManager] Error handling processed audio: {e}")
         finally:
@@ -187,6 +248,9 @@ class SocketManager:
             self.audio_processor.finish_processing(self.call_id)
     
     async def disconnect(self):
+        # Cancel all pending on_receive tasks before disconnecting
+        await self._cancel_pending_on_receive_tasks(exclude_current=False)
+        
         # Clean up audio processor state
         self.audio_processor.cleanup_call_state(self.call_id)
         
@@ -200,3 +264,7 @@ class SocketManager:
     def is_audio_processing(self) -> bool:
         """Check if audio is currently being processed"""
         return self.audio_processor.is_processing(self.call_id)
+    
+    def get_pending_tasks_count(self) -> int:
+        """Get the number of pending on_receive tasks (useful for debugging)"""
+        return len([task for task in self.pending_on_receive_tasks if not task.done()])
